@@ -29,6 +29,31 @@ def date_to_timestamp(year_month: str) -> int:
     date = datetime(year, month, 1)  # Primer día del mes
     return int(time.mktime(date.timetuple()) * 1000)  # Convertir a milisegundos
 
+# Formatear tabla en Markdown
+def format_table_markdown(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    table = soup.find('table')
+    markdown_text = ""
+
+    rows = table.find_all('tr')
+    headers = [header.get_text(strip=True) for header in rows[0].find_all(['th', 'td'])]
+
+    for row in rows[1:]:
+        cells = row.find_all(['th', 'td'])
+        row_data = [cell.get_text(strip=True) for cell in cells]
+        
+        if any(row_data[1:]):
+            markdown_text += f"{row_data[0]}\n"
+            for i, cell in enumerate(row_data[1:], start=1):
+                if cell:
+                    markdown_text += f"- {headers[i]}: ${cell}\n"
+            markdown_text += "\n"
+        else:
+            markdown_text += f"{row_data[0]}: No se han encontrado.\n\n"
+
+    return markdown_text.strip()
+
+
 # Generar URL
 def generate_url(origin: str, destination: str, year_month: str) -> str:
     """Genera la URL para la búsqueda en Smiles."""
@@ -92,7 +117,8 @@ def wait_for_page_load(driver, url):
                 print(tabla.prettify())
                 # La tabla la devolvemos como tipo tabla para mensaje de Telegram
 
-                return tabla.prettify()
+                #return tabla.prettify()
+                return soup.prettify()
             else:
                 print("No se encontró ninguna tabla dentro del div con class='resume-filters'")
                 return "No se encontró ninguna tabla dentro del div con class='resume-filters'"
@@ -142,7 +168,7 @@ def handle_message(update: Update, context: CallbackContext) -> None:
             update.message.reply_document(document=file, filename="page_content.html")
 
         # Enviamos la tabla a Telegram
-        update.message.reply_text(page_content)
+        update.message.reply_text(format_table_markdown(page_content))
 
     except Exception as e:
         update.message.reply_text(f"Error procesando el mensaje: {e}")
