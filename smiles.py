@@ -20,6 +20,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEFAULT_YEAR = int(os.getenv("DEFAULT_YEAR", "2024"))
 SELENIUM_TIMEOUT = 30  # Tiempo de espera en segundos para cargar la página
+RESPUESTA = 'No hubo respuesta.'
 
 # Conversión de fecha a timestamp
 def date_to_timestamp(year_month: str) -> int:
@@ -69,19 +70,38 @@ def wait_for_page_load(driver, url):
     """Navega a la URL y espera a que la página termine de cargar."""
     driver.get(url)
     try:
-        # Esperar 10 segundos antes de interactuar con la página
-        time.sleep(10)
-        
-        # Esperar a que la página cargue completamente
+        # Esperar 15 segundos antes de interactuar con la página
+        time.sleep(15)
+
+        # Buscamos un elemento que esté presente en la página
         WebDriverWait(driver, SELENIUM_TIMEOUT).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
+            EC.presence_of_element_located((By.CLASS_NAME, "resume-filters"))
         )
         
         # Extraer el contenido de la página
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        return soup.prettify()
+
+        # Buscar el único div con class="resume-filters"
+        div_resume_filters = soup.find("div", class_="resume-filters")
+
+        # Extraer la tabla dentro de ese div
+        if div_resume_filters:
+            tabla = div_resume_filters.find("table")
+            if tabla:
+                print("Contenido de la tabla encontrada:")
+                print(tabla.prettify())
+                # La tabla la devolvemos como tipo tabla para mensaje de Telegram
+
+                return tabla.prettify()
+            else:
+                print("No se encontró ninguna tabla dentro del div con class='resume-filters'")
+                return "No se encontró ninguna tabla dentro del div con class='resume-filters'"
+        else:
+            print("No se encontró el div con class='resume-filters'")
+            return "No se encontró el div con class='resume-filters'"
     except TimeoutException as e:
         return f"Error cargando la página con Selenium: {e}"
+
 
 # Procesar mensajes
 def handle_message(update: Update, context: CallbackContext) -> None:
@@ -120,6 +140,9 @@ def handle_message(update: Update, context: CallbackContext) -> None:
         # Adjuntar el archivo HTML en el mensaje de respuesta
         with open(html_file_path, "rb") as file:
             update.message.reply_document(document=file, filename="page_content.html")
+
+        # Enviamos la tabla a Telegram
+        update.message.reply_text(page_content)
 
     except Exception as e:
         update.message.reply_text(f"Error procesando el mensaje: {e}")
