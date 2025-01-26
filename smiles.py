@@ -18,7 +18,7 @@ from telegram.ext import CommandHandler, Updater
 # Cargar variables de entorno
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-DEFAULT_YEAR = int(os.getenv("DEFAULT_YEAR", "2024"))
+DEFAULT_YEAR = int(os.getenv("DEFAULT_YEAR", "2025"))
 SELENIUM_TIMEOUT = 30  # Tiempo de espera en segundos para cargar la página
 RESPUESTA = 'No hubo respuesta.'
 
@@ -73,7 +73,7 @@ def setup_driver():
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')  # Deshabilitar GPU
-    options.add_argument('--window-size=1920x1080')  # Establecer tamaño de ventana
+    options.add_argument('--window-size=853x1280')  # Establecer tamaño de ventana
     options.add_argument('--start-maximized')  # Iniciar maximizado
     options.add_argument('--disable-extensions')  # Deshabilitar extensiones
     options.add_argument('--disable-infobars')  # Deshabilitar infobars
@@ -90,6 +90,40 @@ def setup_driver():
     driver = webdriver.Chrome(options=options)
     return driver
 
+def wait_for_page_load_dos(driver, url):
+    """Navega a la URL y espera a que la página termine de cargar."""
+    driver.get(url)
+    try:
+        # Esperar 15 segundos antes de interactuar con la página
+        time.sleep(15)
+        try:
+            element = driver.find_element(By.CLASS_NAME, "table-nav.purple-nav")
+            element.click()
+            print("Se hizo clic en el elemento 'table-nav purple-nav'")
+        except:
+            return("No se encontraron elementos.")
+
+        # Extraer el contenido de la página
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+
+        # Buscar el único div con class="resume-filters"
+        div_resume_filters = soup.find("div", class_="resume-filters")
+
+        # Extraer la tabla dentro de ese div
+        if div_resume_filters:
+            tabla = div_resume_filters.find("table")
+            if tabla:
+                return soup.prettify()
+            else:
+                print("No se encontró ninguna tabla dentro del div con class='resume-filters'")
+                return "No se encontró ninguna tabla dentro del div con class='resume-filters'"
+        else:
+            print("No se encontró el div con class='resume-filters'")
+            return "No se encontró el div con class='resume-filters'"
+    except TimeoutException as e:
+        return f"Error cargando la página con Selenium: {e}"
+
+    
 # Verificar carga dinámica de la página
 def wait_for_page_load(driver, url):
     """Navega a la URL y espera a que la página termine de cargar."""
@@ -122,7 +156,7 @@ def wait_for_page_load(driver, url):
             return "No se encontró el div con class='resume-filters'"
     except TimeoutException as e:
         return f"Error cargando la página con Selenium: {e}"
-
+    
 
 # Procesar mensajes
 def handle_message(update: Update, context: CallbackContext) -> None:
@@ -147,23 +181,37 @@ def handle_message(update: Update, context: CallbackContext) -> None:
             f"✅ Nueva petición cargada:\n\n✈️ Origen: {origin}\n✈️ Destino: {destination}\n✈️ Fecha: {date}\n\n🌐 URL: {url}\n\n⌛ Obteniendo resultados..."
         )
 
-        # Usar Selenium para verificar la página
+        # Usar Selenium INICIO
         driver = setup_driver()
         page_content = wait_for_page_load(driver, url)
         driver.quit()
-
-        # Guardar el contenido en un archivo HTML
-        html_file_path = "page_content.html"
-
+        html_file_path = "1.html"
         with open(html_file_path, "w", encoding="utf-8") as file:
             file.write(page_content)
 
         # Adjuntar el archivo HTML en el mensaje de respuesta
         with open(html_file_path, "rb") as file:
-            update.message.reply_document(document=file, filename="page_content.html")
+            update.message.reply_document(document=file, filename="1.html")
 
-        # Enviamos la tabla a Telegram
         update.message.reply_text(format_table_markdown(page_content))
+        # Usar Selenium FIN
+
+
+        # Usar Selenium INICIO
+        driver = setup_driver()
+        page_content = wait_for_page_load_dos(driver, url)
+        driver.quit()
+        html_file_path = "2.html"
+        with open(html_file_path, "w", encoding="utf-8") as file:
+            file.write(page_content)
+
+        # Adjuntar el archivo HTML en el mensaje de respuesta
+        with open(html_file_path, "rb") as file:
+            update.message.reply_document(document=file, filename="2.html")
+
+        update.message.reply_text(format_table_markdown(page_content))
+        # Usar Selenium FIN
+        
 
     except Exception as e:
         update.message.reply_text(f"Error procesando el mensaje: {e}")
