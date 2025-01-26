@@ -113,11 +113,6 @@ def wait_for_page_load(driver, url):
         if div_resume_filters:
             tabla = div_resume_filters.find("table")
             if tabla:
-                print("Contenido de la tabla encontrada:")
-                print(tabla.prettify())
-                # La tabla la devolvemos como tipo tabla para mensaje de Telegram
-
-                #return tabla.prettify()
                 return soup.prettify()
             else:
                 print("No se encontró ninguna tabla dentro del div con class='resume-filters'")
