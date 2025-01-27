@@ -6,280 +6,225 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
 import os
 import time
-from telegram.ext import CommandHandler, Updater
 
-# Cargar variables de entorno
+# Load environment variables
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEFAULT_YEAR = int(os.getenv("DEFAULT_YEAR", "2025"))
-SELENIUM_TIMEOUT = 30  # Tiempo de espera en segundos para cargar la página
+SELENIUM_TIMEOUT = 30  # Timeout in seconds for page loading
 RESPUESTA = 'No hubo respuesta.'
 LOCK_FILE = "process.lock"
 
-# Función para manejar el bloqueo
 def is_locked():
+    """
+    Check if another process is running by looking for the lock file.
+    """
     return os.path.exists(LOCK_FILE)
 
 def lock():
+    """Create a lock file to indicate that a process is running."""
     with open(LOCK_FILE, "w") as file:
         file.write("locked")
 
 def unlock():
+    """Remove the lock file if it exists to end the process indication."""
     if is_locked():
         os.remove(LOCK_FILE)
 
-# Conversión de fecha a timestamp
-def date_to_timestamp(year_month: str) -> int:
-    """Convierte una fecha en formato YYYY-MM a un timestamp UNIX."""
-    year, month = map(int, year_month.split("-"))
-    date = datetime(year, month, 1)  # Primer día del mes
-    return int(time.mktime(date.timetuple()) * 1000)  # Convertir a milisegundos
+def date_to_timestamp(year_month_day: str) -> int:
+    """
+    Convert date in 'YYYY-MM-DD' format to UNIX timestamp in milliseconds.
+    """
+    year, month, day = map(int, year_month_day.split("-"))
+    date = datetime(year, month, day)
+    return int(time.mktime(date.timetuple()) * 1000)
 
 def format_table_markdown(html_content):
+    """
+    Convert HTML table content to Markdown format, ensuring correct airline-price pairing.
+    """
     soup = BeautifulSoup(html_content, 'html.parser')
     table = soup.find('table')
     markdown_text = ""
 
     if not table:
-        return markdown_text
+        return "No table found in the content."
 
-    # Obtener todas las filas
     rows = table.find_all('tr')
     
-    # Extraer nombres de aerolíneas de la primera fila (ignorar la celda con 'table-nav')
+    # Extract airline names from the header row
     airline_names = []
     header_cells = rows[0].find_all(['th', 'td'])
-    for td in header_cells:
-        td_class = td.get("class", [])
-        if "table-nav" in td_class:
-            continue
+    for td in header_cells[1:]:  # Start from index 1 to skip the "Compañía Aérea" header
         span = td.find('span')
         if span:
             airline_names.append(span.get_text(strip=True))
 
-    # Recorrer el resto de filas
+    # Process each row for flight types and prices
     for row in rows[1:]:
-        row_cells = row.find_all(['th', 'td'])
+        cells = row.find_all(['th', 'td'])
+        flight_type = cells[0].get_text(strip=True) if cells else "Unknown"
         
-        # El primer cell corresponde al tipo de vuelo (Directo, 1 Escala, etc.)
-        flight_type = row_cells[0].get_text(strip=True)
-        
-        # Omitir la primera celda en prices, pues ya la hemos guardado en flight_type
-        # y omitir cualquier celda con la clase 'table-nav'
-        price_cells = []
-        for cell in row_cells[1:]:
-            if "table-nav" not in cell.get("class", []):
-                price_cells.append(cell)
+        # Prices are in the same order as airlines in the header
+        price_texts = [cell.get_text(strip=True) for cell in cells[1:] if cell.get_text(strip=True)]
 
-        # Convertir en texto
-        price_texts = [cell.get_text(strip=True) for cell in price_cells]
-
-        # Combinar aerolíneas y precios (si la primera fila tenía 4 aerolíneas, esperamos 4 prices)
-        # Si hay menos celdas que aerolíneas o viceversa, zip limitará a la menor longitud.
+        # Combine airlines with prices, ensuring alignment
         pairs = list(zip(airline_names, price_texts))
-
-        # Construir líneas para la fila actual, omitiendo las vacías.
-        row_lines = []
-        for airline, price in pairs:
-            if price:  # si no está vacío
-                row_lines.append(f" ▪️ {airline}: ${price}")
-
-        # Solo agregar la sección si hay al menos un precio para esa fila
-        if row_lines:
+        
+        if not price_texts:
+            markdown_text += f"{flight_type}: Ninguno\n\n"
+        else:
             markdown_text += f"{flight_type}\n"
-            for line in row_lines:
-                markdown_text += line + "\n"
+            for airline, price in pairs:
+                if price:
+                    markdown_text += f" ▪️ {airline}: ${price}\n"
             markdown_text += "\n"
 
-    return markdown_text.strip()
+    return markdown_text.strip() if markdown_text else "No valid flight data found."
 
-
-
-# Generar URL
-def generate_url(origin: str, destination: str, year_month: str) -> str:
-    """Genera la URL para la búsqueda en Smiles."""
-    departure_timestamp = date_to_timestamp(year_month)
-    url = (
+def generate_url(origin: str, destination: str, year_month_day: str) -> str:
+    """
+    Generate URL for Smiles flight search.
+    """
+    departure_timestamp = date_to_timestamp(year_month_day)
+    return (
         f"https://www.smiles.com.ar/emission?"
         f"originAirportCode={origin}&destinationAirportCode={destination}"
         f"&departureDate={departure_timestamp}&adults=1&children=0&infants=0"
         f"&isFlexibleDateChecked=false&tripType=1&cabinType=all&currencyCode=ARS"
     )
-    return url
 
-# Configurar Selenium
 def setup_driver():
+    """
+    Set up and configure Selenium WebDriver with Chrome options for headless browsing.
+    """
     options = Options()
-    options.add_argument('--headless')  # Ejecutar en modo headless
+    options.add_argument('--headless')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')  # Deshabilitar GPU
-    options.add_argument('--window-size=853x1280')  # Establecer tamaño de ventana
-    options.add_argument('--start-maximized')  # Iniciar maximizado
-    options.add_argument('--disable-extensions')  # Deshabilitar extensiones
-    options.add_argument('--disable-infobars')  # Deshabilitar infobars
-    options.add_argument('--incognito')  # Modo incógnito
-    options.add_argument('--disable-popup-blocking')  # Deshabilitar bloqueo de pop-ups
-    options.add_argument('--disable-notifications')  # Deshabilitar notificaciones
-    options.add_argument('--disable-blink-features=AutomationControlled')  # Deshabilitar la detección de automatización
-    options.add_argument('--remote-debugging-port=9222')  # Habilitar depuración remota
-    options.add_argument('--ignore-certificate-errors')  # Ignorar errores de certificado
-    options.add_argument('--disable-logging')  # Deshabilitar el registro
-    options.add_argument('--log-level=3')  # Establecer nivel de registro
-    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3')  # Establecer agente de usuario
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--disable-extensions')
+    options.add_argument('--disable-infobars')
+    options.add_argument('--incognito')
+    options.add_argument('--disable-popup-blocking')
+    options.add_argument('--disable-notifications')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument('--remote-debugging-port=9222')
+    options.add_argument('--ignore-certificate-errors')
+    options.add_argument('--disable-logging')
+    options.add_argument('--log-level=3')
+    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3')
+    
+    return webdriver.Chrome(options=options)
 
-    driver = webdriver.Chrome(options=options)
-    return driver
-
-def wait_for_page_load_dos(driver, url):
-    """Navega a la URL y espera a que la página termine de cargar."""
-    driver.get(url)
-    try:
-        # Esperar 15 segundos antes de interactuar con la página
-        time.sleep(15)
-
-        # Verificar si el elemento existe y hacer clic
-        try:
-            element = driver.find_element(By.CLASS_NAME, "table-nav.purple-nav")
-            element.click()
-            print("Se hizo clic en el elemento 'table-nav purple-nav'")
-        except:
-            print("El elemento 'table-nav purple-nav' no se encontró, no se hizo clic")
-
-        # Esperar un momento para que la acción tenga efecto
-        time.sleep(5)
-
-        # Extraer el contenido de la página
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-
-        # Buscar el único div con class="resume-filters"
-        div_resume_filters = soup.find("div", class_="resume-filters")
-
-        # Extraer la tabla dentro de ese div
-        if div_resume_filters:
-            tabla = div_resume_filters.find("table")
-            if tabla:
-                return tabla.prettify()
-            else:
-                print("No se encontró ninguna tabla dentro del div con class='resume-filters'")
-                return "No se encontró ninguna tabla dentro del div con class='resume-filters'"
-        else:
-            print("No se encontró el div con class='resume-filters'")
-            return "No se encontró el div con class='resume-filters'"
-    except TimeoutException as e:
-        return f"Error cargando la página con Selenium: {e}"
-
-# Verificar carga dinámica de la página
 def wait_for_page_load(driver, url):
-    """Navega a la URL y espera a que la página termine de cargar."""
+    """
+    Navigate to URL, collect initial data, click to update, wait, then collect updated data.
+
+    :param driver: Selenium WebDriver instance
+    :param url: URL to navigate to
+    :return: Combined HTML content of both table states or error message
+    """
     driver.get(url)
     try:
-        # Esperar 15 segundos antes de interactuar con la página
-        time.sleep(15)
-
-        # Buscamos un elemento que esté presente en la página
+        # Wait for the initial table to load
         WebDriverWait(driver, SELENIUM_TIMEOUT).until(
             EC.presence_of_element_located((By.CLASS_NAME, "resume-filters"))
         )
-        
-        # Extraer el contenido de la página
-        soup = BeautifulSoup(driver.page_source, "html.parser")
 
-        # Buscar el único div con class="resume-filters"
-        div_resume_filters = soup.find("div", class_="resume-filters")
+        # Capture the initial table data
+        initial_content = driver.page_source
+        soup_initial = BeautifulSoup(initial_content, "html.parser")
+        table_initial = soup_initial.find("div", class_="resume-filters").find("table")
 
-        # Extraer la tabla dentro de ese div
-        if div_resume_filters:
-            tabla = div_resume_filters.find("table")
-            if tabla:
-                return tabla.prettify()
-            else:
-                print("No se encontró ninguna tabla dentro del div con class='resume-filters'")
-                return "No se encontró ninguna tabla dentro del div con class='resume-filters'"
-        else:
-            print("No se encontró el div con class='resume-filters'")
-            return "No se encontró el div con class='resume-filters'"
-    except TimeoutException as e:
-        return f"Error cargando la página con Selenium: {e}"
+        if not table_initial:
+            return "No initial table data found."
 
-# Procesar mensajes
+        # Click on the element to update the table
+        try:
+            clickable_element = WebDriverWait(driver, SELENIUM_TIMEOUT).until(
+                EC.element_to_be_clickable((By.CLASS_NAME, "table-nav.purple-nav"))
+            )
+            clickable_element.click()
+            
+            # Wait for 5 seconds to ensure the page updates
+            time.sleep(5)
+
+            # Capture the updated table data
+            updated_content = driver.page_source
+            soup_updated = BeautifulSoup(updated_content, "html.parser")
+            table_updated = soup_updated.find("div", class_="resume-filters").find("table")
+
+            if not table_updated:
+                print("No updated table data found after click.")
+                return table_initial.prettify()
+
+            # Combine initial and updated data
+            return table_initial.prettify() + "\n\n" + table_updated.prettify()
+
+        except (NoSuchElementException, StaleElementReferenceException) as e:
+            print(f"Click action failed: {e}")
+            return table_initial.prettify()
+
+    except TimeoutException:
+        return f"Error loading the page with Selenium: Timeout after {SELENIUM_TIMEOUT} seconds."
+
 def handle_message(update: Update, context: CallbackContext) -> None:
+    """
+    Handle incoming messages from Telegram, manage lock to prevent concurrent executions.
+    """
     if is_locked():
-        update.message.reply_text("⚠️ Otro proceso está en ejecución. Por favor, inténtalo más tarde.")
+        update.message.reply_text("⚠️ Another process is running. Please try again later.")
         return
 
     lock()
     try:
-        # Leer mensaje
-        message = update.message.text
-        parts = message.split()  # Separar por espacios
-        if len(parts) != 3:
+        message = update.message.text.split()
+        if len(message) != 3:
             update.message.reply_text(
-                "❌ Uso incorrecto. \n\n✈️ Debe tener 3 partes: origen (Ezeiza: EZE), destino (Madrid: MAD) y fecha (Formato YYYY-MM). \n\n👉 EZE MAD 2025-12"
+                "❌ Incorrect usage. \n\n✈️ Must have 3 parts: origin (Ezeiza: EZE), destination (Madrid: MAD), and date (Format YYYY-MM-DD). \n\n👉 EZE MAD 2025-12"
             )
             return
 
-        origin, destination, date = parts
-        # Si es un alias como "12", convertir a "2024-MM"
-        if date.isdigit():
+        origin, destination, date = message
+        if date.isdigit() and len(date) == 2:
             date = f"{DEFAULT_YEAR}-{date.zfill(2)}"
 
-        # Generar URL
         url = generate_url(origin, destination, date)
         update.message.reply_text(
-            f"✅ Nueva petición cargada:\n\n✈️ Origen: {origin}\n✈️ Destino: {destination}\n✈️ Fecha: {date}\n\n🌐 URL: {url}\n\n⌛ Obteniendo resultados..."
+            f"✅ New request loaded:\n\n✈️ Origin: {origin}\n✈️ Destination: {destination}\n✈️ Date: {date}\n\n🌐 URL: {url}\n\n⌛ Getting results..."
         )
 
-        # Usar Selenium INICIO
         driver = setup_driver()
         page_content = wait_for_page_load(driver, url)
         driver.quit()
-        # html_file_path = "1.html"
-        # with open(html_file_path, "w", encoding="utf-8") as file:
-        #     file.write(page_content)
 
-        # # Adjuntar el archivo HTML en el mensaje de respuesta
-        # with open(html_file_path, "rb") as file:
-        #     update.message.reply_document(document=file, filename="1.html")
+        with open("1.html", "w", encoding="utf-8") as file:
+            file.write(page_content)
+        with open("1.html", "rb") as file:
+            update.message.reply_document(document=file, filename="1.html")
 
         update.message.reply_text(format_table_markdown(page_content))
-        # Usar Selenium FIN
-
-        # Usar Selenium INICIO
-        driver = setup_driver()
-        page_content = wait_for_page_load_dos(driver, url)
-        driver.quit()
-        # html_file_path = "2.html"
-        # with open(html_file_path, "w", encoding="utf-8") as file:
-        #     file.write(page_content)
-
-        # # Adjuntar el archivo HTML en el mensaje de respuesta
-        # with open(html_file_path, "rb") as file:
-        #     update.message.reply_document(document=file, filename="2.html")
-
-        update.message.reply_text(format_table_markdown(page_content))
-        # Usar Selenium FIN
 
     except Exception as e:
-        update.message.reply_text(f"Error procesando el mensaje: {e}")
+        update.message.reply_text(f"Error processing the message: {e}")
     finally:
         unlock()
 
-# Configurar el bot
 def main():
+    """
+    Initialize and run the Telegram bot.
+    """
     updater = Updater(TELEGRAM_BOT_TOKEN)
     dispatcher = updater.dispatcher
-
-    # Agregar manejadores
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
-    # Iniciar bot
     updater.start_polling()
     updater.idle()
 
