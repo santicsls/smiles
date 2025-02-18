@@ -17,7 +17,7 @@ import time
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEFAULT_YEAR = int(os.getenv("DEFAULT_YEAR", "2025"))
-SELENIUM_TIMEOUT = 30  # Timeout in seconds for page loading
+SELENIUM_TIMEOUT = 15  # Timeout in seconds for page loading
 RESPUESTA = 'No hubo respuesta.'
 LOCK_FILE = "process.lock"
 
@@ -69,22 +69,26 @@ def format_table_markdown(html_content):
     # Process each row for flight types and prices
     for row in rows[1:]:
         cells = row.find_all(['th', 'td'])
-        flight_type = cells[0].get_text(strip=True) if cells else "Unknown"
+        if not cells:
+            continue
+            
+        flight_type = cells[0].get_text(strip=True)
         
-        # Prices are in the same order as airlines in the header
-        price_texts = [cell.get_text(strip=True) for cell in cells[1:] if cell.get_text(strip=True)]
+        # Extract prices while maintaining alignment with airline_names
+        price_texts = []
+        for cell in cells[1:]:
+            price = cell.get_text(strip=True)
+            if price and price.replace('.', '').isdigit():  # Check if it's a valid number
+                price_texts.append(price)
+            else:
+                price_texts.append(None)  # Maintain position for empty cells
 
-        # Combine airlines with prices, ensuring alignment
-        pairs = list(zip(airline_names, price_texts))
-        
-        if not price_texts:
-            markdown_text += f"{flight_type}: Ninguno\n\n"
-        else:
-            markdown_text += f"{flight_type}\n"
-            for airline, price in pairs:
-                if price:
-                    markdown_text += f" ▪️ {airline}: ${price}\n"
-            markdown_text += "\n"
+        # Combine airlines with prices, skipping None values
+        markdown_text += f"{flight_type}\n"
+        for airline, price in zip(airline_names, price_texts):
+            if price is not None:
+                markdown_text += f" ▪️ {airline}: {price} millas\n"
+        markdown_text += "\n"
 
     return markdown_text.strip() if markdown_text else "No valid flight data found."
 
@@ -124,7 +128,7 @@ def setup_driver():
     
     return webdriver.Chrome(options=options)
 
-def wait_for_page_load(driver, url):
+def obtener_tabla(driver, url):
     """
     Navigate to URL, collect initial data, click to update, wait, then collect updated data.
 
@@ -175,11 +179,9 @@ def wait_for_page_load(driver, url):
 
     except TimeoutException:
         return f"Error loading the page with Selenium: Timeout after {SELENIUM_TIMEOUT} seconds."
+    
 
 def handle_message(update: Update, context: CallbackContext) -> None:
-    """
-    Handle incoming messages from Telegram, manage lock to prevent concurrent executions.
-    """
     if is_locked():
         update.message.reply_text("⚠️ Another process is running. Please try again later.")
         return
@@ -189,7 +191,7 @@ def handle_message(update: Update, context: CallbackContext) -> None:
         message = update.message.text.split()
         if len(message) != 3:
             update.message.reply_text(
-                "❌ Incorrect usage. \n\n✈️ Must have 3 parts: origin (Ezeiza: EZE), destination (Madrid: MAD), and date (Format YYYY-MM-DD). \n\n👉 EZE MAD 2025-12"
+                "❌ Uso incorrecto. \n\n✈️ Debe tener 3 partes: origen (Buenos Aires: BUE), destino (Madrid: MAD) y la fecha (Formato YYYY-MM-DD). \n\n👉 Por ejemplo: EZE MAD 2025-12-25\n💡 Aprende los códigos de aereopuertos en: https://es.wikipedia.org/wiki/Anexo:Aeropuertos_según_el_código_IATA"
             )
             return
 
@@ -198,19 +200,15 @@ def handle_message(update: Update, context: CallbackContext) -> None:
             date = f"{DEFAULT_YEAR}-{date.zfill(2)}"
 
         url = generate_url(origin, destination, date)
-        update.message.reply_text(
-            f"✅ New request loaded:\n\n✈️ Origin: {origin}\n✈️ Destination: {destination}\n✈️ Date: {date}\n\n🌐 URL: {url}\n\n⌛ Getting results..."
-        )
+        update.message.reply_text("⌛ Esperá! Obteniendo resultados desde la URL: " + url)
 
         driver = setup_driver()
-        page_content = wait_for_page_load(driver, url)
+        page_content = obtener_tabla(driver, url)
         driver.quit()
-
         with open("1.html", "w", encoding="utf-8") as file:
             file.write(page_content)
         with open("1.html", "rb") as file:
-            update.message.reply_document(document=file, filename="1.html")
-
+            update.message.reply_document(document=file, filename="scraped.html")
         update.message.reply_text(format_table_markdown(page_content))
 
     except Exception as e:
