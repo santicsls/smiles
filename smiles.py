@@ -12,6 +12,10 @@ from datetime import datetime
 from dotenv import load_dotenv
 import os
 import time
+import html
+import shutil
+import glob
+
 
 # Load environment variables
 load_dotenv()
@@ -44,53 +48,6 @@ def date_to_timestamp(year_month_day: str) -> int:
     year, month, day = map(int, year_month_day.split("-"))
     date = datetime(year, month, day)
     return int(time.mktime(date.timetuple()) * 1000)
-
-def format_table_markdown(html_content):
-    """
-    Convert HTML table content to Markdown format, ensuring correct airline-price pairing.
-    """
-    soup = BeautifulSoup(html_content, 'html.parser')
-    table = soup.find('table')
-    markdown_text = ""
-
-    if not table:
-        return "No table found in the content."
-
-    rows = table.find_all('tr')
-    
-    # Extract airline names from the header row
-    airline_names = []
-    header_cells = rows[0].find_all(['th', 'td'])
-    for td in header_cells[1:]:  # Start from index 1 to skip the "Compañía Aérea" header
-        span = td.find('span')
-        if span:
-            airline_names.append(span.get_text(strip=True))
-
-    # Process each row for flight types and prices
-    for row in rows[1:]:
-        cells = row.find_all(['th', 'td'])
-        if not cells:
-            continue
-            
-        flight_type = cells[0].get_text(strip=True)
-        
-        # Extract prices while maintaining alignment with airline_names
-        price_texts = []
-        for cell in cells[1:]:
-            price = cell.get_text(strip=True)
-            if price and price.replace('.', '').isdigit():  # Check if it's a valid number
-                price_texts.append(price)
-            else:
-                price_texts.append(None)  # Maintain position for empty cells
-
-        # Combine airlines with prices, skipping None values
-        markdown_text += f"{flight_type}\n"
-        for airline, price in zip(airline_names, price_texts):
-            if price is not None:
-                markdown_text += f" ▪️ {airline}: {price} millas\n"
-        markdown_text += "\n"
-
-    return markdown_text.strip() if markdown_text else "No valid flight data found."
 
 def generate_url(origin: str, destination: str, year_month_day: str) -> str:
     """
@@ -128,91 +85,175 @@ def setup_driver():
     
     return webdriver.Chrome(options=options)
 
-def obtener_tabla(driver, url):
+def clean_temp_folders():
     """
-    Navigate to URL, collect initial data, click to update, wait, then collect updated data.
+    Elimina todas las carpetas temporales creadas por Chromium.
+    """
+    temp_dir = os.getenv('TEMP', '/tmp')
+    temp_folders = glob.glob(os.path.join(temp_dir, '.com.google.Chrome.*'))
+    for folder in temp_folders:
+        try:
+            shutil.rmtree(folder)
+        except Exception as e:
+            print(f"Error al eliminar la carpeta {folder}: {e}")
+    print("Carpetas temporales eliminadas. Sesion empezada o terminada.")
 
-    :param driver: Selenium WebDriver instance
-    :param url: URL to navigate to
-    :return: Combined HTML content of both table states or error message
+def obtener_listado(driver, url, date):
+    """
+    Navega a la URL, espera que se cargue el div 'selection-flights'
+    y recorre cada div con clase 'group-info-flights' para extraer los datos.
+    
+    Retorna un mensaje en formato HTML con los detalles de cada vuelo.
     """
     driver.get(url)
     try:
-        # Wait for the initial table to load
-        WebDriverWait(driver, SELENIUM_TIMEOUT).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "resume-filters"))
+        print("Esperando a que se cargue la página...")
+
+        # Espera a que se cargue el contenedor principal de vuelos
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "selection-flights"))
         )
+        
+        # Extraer el contenido del div 'selection-flights'
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        selection_div = soup.find("div", class_="selection-flights")
+        if not selection_div:
+            return ["No se encontraron resultados de vuelos."]
 
-        # Capture the initial table data
-        initial_content = driver.page_source
-        soup_initial = BeautifulSoup(initial_content, "html.parser")
-        table_initial = soup_initial.find("div", class_="resume-filters").find("table")
+        # Lista donde se irán almacenando los datos de cada vuelo
+        vuelos = []
+        # Itera sobre cada div que agrupa la información de un vuelo
+        grupos = selection_div.find_all("div", class_="group-info-flights")
+        for grupo in grupos[:5]:  # Limitar a los primeros 5 vuelos
+            vuelo = {}
 
-        if not table_initial:
-            return "No initial table data found."
+            # Extrae la sección de detalles del viaje
+            travel_details = grupo.find("div", class_="travel-details")
+            if travel_details:
+                origen_div = travel_details.find("div", class_="travel-origin")
+                destino_div = travel_details.find("div", class_="travel-arrival")
+                info_viaje = travel_details.find("div", class_="travel-info")
+                escalas = ""
+                duracion = ""
+                if info_viaje:
+                    escalas_elem = info_viaje.find("div", class_="travel-stops")
+                    duracion_elem = info_viaje.find("div", class_="travel-duration")
+                    if escalas_elem:
+                        escalas = escalas_elem.get_text(" ", strip=True).lower()
+                    if duracion_elem:
+                        duracion = duracion_elem.get_text(" ", strip=True)
+                
+                origen_text = origen_div.get_text(" ", strip=True) if origen_div else "N/A"
+                destino_text = destino_div.get_text(" ", strip=True) if destino_div else "N/A"
+                
+                # Asegurarse de que siempre se incluya "hs" y "min"
+                origen_text = origen_text.replace("h", " hs ")
+                if "min" not in origen_text:
+                    origen_text += " min"
+                
+                destino_text = destino_text.replace("h", " hs ")
+                if "min" not in destino_text:
+                    destino_text += " min"
+                
+                vuelo["origen"] = origen_text
+                vuelo["destino"] = destino_text
+                vuelo["escalas"] = escalas
+                vuelo["duracion"] = duracion
 
-        # Click on the element to update the table
-        try:
-            clickable_element = WebDriverWait(driver, SELENIUM_TIMEOUT).until(
-                EC.element_to_be_clickable((By.CLASS_NAME, "table-nav.purple-nav"))
+            # Extrae la disponibilidad de asientos
+            seat_info_div = grupo.find("div", class_="info-seat")
+            vuelo["disponibles"] = seat_info_div.get_text(" ", strip=True).replace("!", "").strip() if seat_info_div else "N/A"
+
+            # Extrae los precios
+            precios = []
+            miles_group = grupo.find("div", class_="miles-group")
+            if miles_group:
+                precio_items = miles_group.find_all("li", class_="list-group-item")
+                for item in precio_items:
+                    texto_precio = item.get_text(" ", strip=True)
+                    if texto_precio:
+                        # Formatear el precio según las reglas especificadas
+                        if "Club Smiles" in texto_precio:
+                            if "+" in texto_precio:
+                                partes = texto_precio.split("+")
+                                millas = partes[0].strip() + " millas"
+                                dinero = partes[1].split("x")[0].strip()
+                                precios.append(f"{millas} + {dinero} x Club Smiles")
+                            else:
+                                millas = texto_precio.split("x")[0].strip() + " millas"
+                                precios.append(f"{millas} x Club Smiles")
+                        else:
+                            millas = texto_precio.split("x")[0].strip() + " millas"
+                            precios.append(f"{millas} x Club Smiles")
+            vuelo["precios"] = precios
+
+            vuelos.append(vuelo)
+
+        # Formatea la información en un mensaje HTML
+        mensajes = []
+        mensaje = ""
+        for vuelo in vuelos:
+            vuelo_info = (
+                "<b>✈️ Vuelo para el " + date + "</b>\n"
+                f"📍 • <b>Origen:</b> {html.escape(vuelo.get('origen', 'N/A'))}\n"
+                f"📍 • <b>Destino:</b> {html.escape(vuelo.get('destino', 'N/A'))}\n"
+                f"⏳ • <b>{html.escape(vuelo.get('duracion', 'N/A'))} horas</b> de duración\n"
+                f"🔁 • <b>Escalas:</b> {html.escape(vuelo.get('escalas', 'N/A'))}\n"
+                f"💺 • <b>{html.escape(vuelo.get('disponibles', 'N/A'))}</b> \n"
+                "💰 • <b>Precios:</b>\n<code>"
             )
-            clickable_element.click()
-            
-            # Wait for 5 seconds to ensure the page updates
-            time.sleep(5)
+            if vuelo.get("precios"):
+                for prec in vuelo["precios"]:
+                    vuelo_info += f" ▫️ {html.escape(prec)}\n"
+            vuelo_info += "</code>\n"
 
-            # Capture the updated table data
-            updated_content = driver.page_source
-            soup_updated = BeautifulSoup(updated_content, "html.parser")
-            table_updated = soup_updated.find("div", class_="resume-filters").find("table")
+            if len(mensaje) + len(vuelo_info) > 4096:  # Telegram message limit
+                mensajes.append(mensaje)
+                mensaje = vuelo_info
+            else:
+                mensaje += vuelo_info
 
-            if not table_updated:
-                print("No updated table data found after click.")
-                return table_initial.prettify()
+        if mensaje:
+            mensajes.append(mensaje)
 
-            # Combine initial and updated data
-            return table_initial.prettify() + "\n\n" + table_updated.prettify()
+        return mensajes if mensajes else ["No se encontró información en el listado."]
 
-        except (NoSuchElementException, StaleElementReferenceException) as e:
-            print(f"Click action failed: {e}")
-            return table_initial.prettify()
-
-    except TimeoutException:
-        return f"Error loading the page with Selenium: Timeout after {SELENIUM_TIMEOUT} seconds."
-    
+    except Exception as e:
+        return [f"Error al obtener datos: {e}"]
+    finally:
+        driver.quit()
+        clean_temp_folders()
 
 def handle_message(update: Update, context: CallbackContext) -> None:
     if is_locked():
         update.message.reply_text("⚠️ Another process is running. Please try again later.")
         return
 
-    lock()
+    lock() # Lock the process to prevent concurrent requests
     try:
         message = update.message.text.split()
         if len(message) != 3:
             update.message.reply_text(
-                "❌ Uso incorrecto. \n\n✈️ Debe tener 3 partes: origen (Buenos Aires: BUE), destino (Madrid: MAD) y la fecha (Formato YYYY-MM-DD). \n\n👉 Por ejemplo: EZE MAD 2025-12-25\n💡 Aprende los códigos de aereopuertos en: https://es.wikipedia.org/wiki/Anexo:Aeropuertos_según_el_código_IATA"
+                "❌ Uso incorrecto. \n\n✈️ Debe tener 3 partes: origen (Buenos Aires: BUE), destino (Madrid: MAD) y la fecha (Formato MM-DD). \n\n👉 Por ejemplo: EZE MAD 12-25\n💡 <a href='https://es.wikipedia.org/wiki/Anexo:Aeropuertos_según_el_código_IATA'>Aprende los códigos de aereopuertos acá</a>",
+                parse_mode='HTML'
             )
             return
 
         origin, destination, date = message
-        if date.isdigit() and len(date) == 2:
-            date = f"{DEFAULT_YEAR}-{date.zfill(2)}"
+        date = f"{DEFAULT_YEAR}-{date}"
 
         url = generate_url(origin, destination, date)
-        update.message.reply_text("⌛ Esperá! Obteniendo resultados desde la URL: " + url)
+        update.message.reply_text("⌛ Esperá! Obteniendo resultados desde la URL: " + url, parse_mode='HTML')
 
         driver = setup_driver()
-        page_content = obtener_tabla(driver, url)
-        driver.quit()
-        with open("1.html", "w", encoding="utf-8") as file:
-            file.write(page_content)
-        with open("1.html", "rb") as file:
-            update.message.reply_document(document=file, filename="scraped.html")
-        update.message.reply_text(format_table_markdown(page_content))
+        listados = obtener_listado(driver, url, date)
+
+        for listado in listados:
+            update.message.reply_text(listado, parse_mode='HTML')
 
     except Exception as e:
-        update.message.reply_text(f"Error processing the message: {e}")
+        error_message = html.escape(str(e))
+        update.message.reply_text(f"❌ Comunicale el error al administrador: <b>{error_message}</b>", parse_mode='HTML')
     finally:
         unlock()
 
@@ -220,6 +261,7 @@ def main():
     """
     Initialize and run the Telegram bot.
     """
+    clean_temp_folders()
     updater = Updater(TELEGRAM_BOT_TOKEN)
     dispatcher = updater.dispatcher
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
